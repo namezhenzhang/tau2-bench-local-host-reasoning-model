@@ -66,6 +66,11 @@ else:
     litellm.disable_cache()
 
 
+# Deduplicate noisy cost-calculation errors (e.g., unmapped custom models) so logs
+# don't get flooded during long eval runs.
+_COST_ERROR_LOGGED_KEYS: set[str] = set()
+
+
 ALLOW_SONNET_THINKING = False
 
 if not ALLOW_SONNET_THINKING:
@@ -95,7 +100,12 @@ def get_response_cost(response: ModelResponse) -> float:
     try:
         cost = completion_cost(completion_response=response)
     except Exception as e:
-        logger.error(e)
+        # Avoid log spam: only log once per (exception type, model).
+        model = getattr(response, "model", None)
+        dedupe_key = f"{type(e).__name__}:{model}"
+        if dedupe_key not in _COST_ERROR_LOGGED_KEYS:
+            logger.error(e)
+            _COST_ERROR_LOGGED_KEYS.add(dedupe_key)
         return 0.0
     return cost
 
@@ -157,11 +167,15 @@ def to_litellm_messages(messages: list[Message]) -> list[dict]:
                     }
                     for tc in message.tool_calls
                 ]
+            reasoning_content = getattr(message, "reasoning_content", None)
             litellm_messages.append(
                 {
                     "role": "assistant",
                     "content": message.content,
                     "tool_calls": tool_calls,
+                    # Some backends support / return a separate reasoning field.
+                    # With `litellm.drop_params = True`, unsupported providers will safely ignore it.
+                    **({"reasoning_content": reasoning_content} if reasoning_content else {}),
                 }
             )
         elif isinstance(message, ToolMessage):
@@ -230,6 +244,12 @@ def generate(
         "The response should be an assistant message"
     )
     content = response.message.content
+    reasoning_content = None
+    # Some providers/models expose hidden reasoning separately (e.g., "reasoning_content").
+    try:
+        reasoning_content = getattr(response.message, "reasoning_content", None)
+    except Exception:
+        reasoning_content = None
     tool_calls = response.message.tool_calls or []
     tool_calls = [
         ToolCall(
@@ -244,6 +264,7 @@ def generate(
     message = AssistantMessage(
         role="assistant",
         content=content,
+        reasoning_content=reasoning_content,
         tool_calls=tool_calls,
         cost=cost,
         usage=usage,

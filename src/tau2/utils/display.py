@@ -499,6 +499,9 @@ class MarkdownDisplay:
             parts.append(f"{turn_prefix}**{msg.role}**:")
             if msg.content:
                 parts.append(msg.content)
+            if isinstance(msg, AssistantMessage) and getattr(msg, "reasoning_content", None):
+                parts.append("**reasoning_content**:")
+                parts.append(f"```\n{msg.reasoning_content}\n```")
             if msg.tool_calls:
                 tool_calls = []
                 for tool in msg.tool_calls:
